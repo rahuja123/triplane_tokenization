@@ -9,6 +9,7 @@ import math
 from .config import TriplaneConfig
 from .model import TriplaneDriveModel
 from .dummy_data import DummyDrivingDataset
+from .nuscenes_data import NuScenesDataset
 
 try:
     import matplotlib
@@ -422,7 +423,8 @@ def visualize_trajectory(past_traj, future_traj, pred_trajs=None,
     print(f"Trajectory visualization saved to {save_path}")
 
 
-def run_all_visualizations(config=None, output_dir='.', device_str=None):
+def run_all_visualizations(config=None, output_dir='.', device_str=None,
+                           model_path=None, nuscenes_dataroot=None, sample_idx=0):
     """
     Run forward pass and generate all heatmap visualizations.
 
@@ -430,9 +432,19 @@ def run_all_visualizations(config=None, output_dir='.', device_str=None):
         config: TriplaneConfig (uses small config if None)
         output_dir: directory to save visualization files
         device_str: 'cuda' or 'cpu'
+        model_path: path to trained model checkpoint (uses random weights if None)
+        nuscenes_dataroot: path to NuScenes data root (uses dummy data if None)
+        sample_idx: which sample index to visualize
     """
     import os
     os.makedirs(output_dir, exist_ok=True)
+
+    # If loading from checkpoint, use saved config
+    if model_path is not None and config is None:
+        checkpoint = torch.load(model_path, map_location='cpu')
+        if 'config' in checkpoint:
+            config = checkpoint['config']
+            print(f"Loaded config from checkpoint: {model_path}")
 
     if config is None:
         config = TriplaneConfig()
@@ -468,12 +480,26 @@ def run_all_visualizations(config=None, output_dir='.', device_str=None):
     print(f"Using device: {device}")
     print(f"Output directory: {output_dir}")
 
-    # Create model and dummy data
+    # Create model
     model = TriplaneDriveModel(config).to(device)
+
+    # Load trained weights if available
+    if model_path is not None:
+        checkpoint = torch.load(model_path, map_location=device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        print(f"Loaded trained weights from: {model_path}")
+
     model.train()
 
-    dataset = DummyDrivingDataset(config, num_samples=4, seed=42)
-    sample = dataset[0]
+    # Dataset
+    if nuscenes_dataroot is not None:
+        print(f"Using NuScenes data from: {nuscenes_dataroot}")
+        dataset = NuScenesDataset(config, dataroot=nuscenes_dataroot)
+    else:
+        dataset = DummyDrivingDataset(config, num_samples=4, seed=42)
+
+    sample_idx = min(sample_idx, len(dataset) - 1)
+    sample = dataset[sample_idx]
     batch = {k: v.unsqueeze(0).to(device) for k, v in sample.items()}
 
     images = batch['images']
@@ -557,9 +583,17 @@ def main():
     parser.add_argument('--device', type=str, default=None, help='Device (cuda/cpu)')
     parser.add_argument('--model_path', type=str, default=None,
                         help='Path to trained model checkpoint (uses random weights if not provided)')
+    parser.add_argument('--nuscenes', type=str, default=None,
+                        help='Path to NuScenes data root (e.g. data/nuscenes)')
+    parser.add_argument('--sample_idx', type=int, default=0,
+                        help='Which sample index to visualize')
     args = parser.parse_args()
 
-    run_all_visualizations(output_dir=args.output_dir, device_str=args.device)
+    run_all_visualizations(
+        output_dir=args.output_dir, device_str=args.device,
+        model_path=args.model_path, nuscenes_dataroot=args.nuscenes,
+        sample_idx=args.sample_idx,
+    )
 
 
 if __name__ == '__main__':

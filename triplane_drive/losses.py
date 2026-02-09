@@ -31,6 +31,8 @@ class PerceptualLoss(nn.Module):
             # Fallback to simple MSE
             return F.mse_loss(pred, target)
 
+        # Ensure VGG features are on the same device as input
+        self.features = self.features.to(pred.device)
         pred_feat = self.features(pred)
         target_feat = self.features(target)
         return F.mse_loss(pred_feat, target_feat)

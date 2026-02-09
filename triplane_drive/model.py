@@ -78,6 +78,13 @@ class TriplaneDriveModel(nn.Module):
         outputs['sensor_tokens'] = sensor_tokens
         outputs['token_counts'] = token_counts
 
+        # Phase 1: scene reconstruction only — skip trajectory prediction
+        if self.config.training_phase == 'phase1':
+            if self.training and self.renderer is not None:
+                rendered, cam_indices = self.renderer(self.triplane, intrinsics, extrinsics)
+                outputs['rendered_images'] = (rendered, cam_indices)
+            return outputs
+
         # 4. Embed past trajectory
         past_traj_tokens = self.traj_embed(past_trajectory)  # (B, T_past*2, d_ar)
 

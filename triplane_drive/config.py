@@ -82,6 +82,9 @@ class TriplaneConfig:
     use_volumetric_rendering: bool = True
     num_render_cameras: int = 2  # cameras to render per batch (for efficiency)
 
+    # Training phase: 'phase1' (render only), 'phase2' (traj only), 'joint' (both)
+    training_phase: str = 'joint'
+
     @property
     def image_feat_h(self) -> int:
         """Height of DINOv2 feature map."""

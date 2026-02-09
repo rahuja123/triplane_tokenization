@@ -99,6 +99,16 @@ def train(config: TriplaneConfig = None, epochs: int = None, batch_size: int = N
     # Model
     model = TriplaneDriveModel(config).to(device)
 
+    # Phase 1: freeze trajectory modules (AR transformer, trajectory head, trajectory embeddings)
+    if config.training_phase == 'phase1':
+        print("Phase 1 training: volumetric rendering only (freezing trajectory modules)")
+        for param in model.ar_transformer.parameters():
+            param.requires_grad = False
+        for param in model.traj_head.parameters():
+            param.requires_grad = False
+        for param in model.traj_embed.parameters():
+            param.requires_grad = False
+
     # Count parameters
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -108,9 +118,9 @@ def train(config: TriplaneConfig = None, epochs: int = None, batch_size: int = N
     # Loss
     loss_fn = CombinedLoss(config)
 
-    # Optimizer
+    # Optimizer (only trainable params)
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        filter(lambda p: p.requires_grad, model.parameters()),
         lr=config.lr,
         weight_decay=config.weight_decay,
     )
@@ -121,16 +131,18 @@ def train(config: TriplaneConfig = None, epochs: int = None, batch_size: int = N
     )
 
     # Training loop
+    phase_label = config.training_phase
     for epoch in range(1, config.num_epochs + 1):
-        avg_loss = train_epoch(model, dataloader, optimizer, loss_fn, device, epoch)
+        avg_loss = train_epoch(model, dataloader, optimizer, loss_fn, device, epoch, phase=phase_label)
         scheduler.step()
         print(f"Epoch {epoch}/{config.num_epochs} - Avg loss: {avg_loss:.4f}")
 
     # Save model
-    save_path = 'triplane_model.pt'
+    save_path = f'triplane_model_{phase_label}.pt' if phase_label != 'joint' else 'triplane_model.pt'
     torch.save({
         'model_state_dict': model.state_dict(),
         'config': config,
+        'training_phase': phase_label,
     }, save_path)
     print(f"Model saved to {save_path}")
 
@@ -147,12 +159,23 @@ def main():
     parser.add_argument('--small', action='store_true', help='Use smaller config for quick testing')
     parser.add_argument('--nuscenes', type=str, default=None,
                         help='Path to NuScenes data root (e.g. data/nuscenes)')
+    parser.add_argument('--phase', type=str, default='joint',
+                        choices=['phase1', 'phase2', 'joint'],
+                        help='Training phase: phase1 (render only), phase2 (traj only), joint')
     args = parser.parse_args()
 
     config = TriplaneConfig()
+    config.training_phase = args.phase
+
     # NuScenes has 6 cameras, not 7
     if args.nuscenes:
         config.num_cameras = 6
+
+    # Phase 1: force rendering on, render more cameras for better signal
+    if args.phase == 'phase1':
+        config.use_volumetric_rendering = True
+        config.num_render_cameras = config.num_cameras  # render all cameras
+
     if args.no_render:
         config.use_volumetric_rendering = False
     if args.small:
