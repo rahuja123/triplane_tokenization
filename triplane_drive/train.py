@@ -6,11 +6,11 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from .config import TriplaneConfig
-from .model import TriplaneDriveModel
-from .losses import CombinedLoss
-from .dummy_data import DummyDrivingDataset
-from .nuscenes_data import NuScenesDataset
+from config import TriplaneConfig
+from model import TriplaneDriveModel
+from losses import CombinedLoss
+from dummy_data import DummyDrivingDataset
+from nuscenes_data import NuScenesDataset
 
 
 def train_epoch(model, dataloader, optimizer, loss_fn, device, epoch, phase='joint'):
@@ -162,6 +162,8 @@ def main():
     parser.add_argument('--phase', type=str, default='joint',
                         choices=['phase1', 'phase2', 'joint'],
                         help='Training phase: phase1 (render only), phase2 (traj only), joint')
+    parser.add_argument('--dino', action='store_true',
+                        help='Use pretrained DINOv2 backbone (requires timm or torch.hub)')
     args = parser.parse_args()
 
     config = TriplaneConfig()
@@ -175,6 +177,9 @@ def main():
     if args.phase == 'phase1':
         config.use_volumetric_rendering = True
         config.num_render_cameras = config.num_cameras  # render all cameras
+
+    if args.dino:
+        config.use_pretrained_dino = True
 
     if args.no_render:
         config.use_volumetric_rendering = False

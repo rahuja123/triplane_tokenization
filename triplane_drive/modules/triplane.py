@@ -4,8 +4,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..config import TriplaneConfig
-from ..utils.geometry import world_to_grid_normalized
+from config import TriplaneConfig
+from utils.geometry import world_to_grid_normalized
 
 
 class TriplaneRepresentation(nn.Module):

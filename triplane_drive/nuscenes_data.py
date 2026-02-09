@@ -8,7 +8,7 @@ import torch
 from torch.utils.data import Dataset
 from PIL import Image
 
-from .config import TriplaneConfig
+from config import TriplaneConfig
 
 
 def quaternion_to_rotation_matrix(q):

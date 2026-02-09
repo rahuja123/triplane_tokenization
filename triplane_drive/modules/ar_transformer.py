@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
-from ..config import TriplaneConfig
+from config import TriplaneConfig
 
 
 class TransformerBlock(nn.Module):

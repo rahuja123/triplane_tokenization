@@ -5,7 +5,7 @@ import numpy as np
 from torch.utils.data import Dataset
 import math
 
-from .config import TriplaneConfig
+from config import TriplaneConfig
 
 
 def generate_camera_params(config: TriplaneConfig):

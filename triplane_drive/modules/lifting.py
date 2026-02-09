@@ -5,9 +5,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
-from ..config import TriplaneConfig
-from ..utils.geometry import project_3d_to_2d, create_triplane_grid
-from ..utils.positional_encoding import sinusoidal_positional_encoding_3d
+from config import TriplaneConfig
+from utils.geometry import project_3d_to_2d, create_triplane_grid
+from utils.positional_encoding import sinusoidal_positional_encoding_3d
 
 
 class PerImageAttentionLayer(nn.Module):

@@ -6,10 +6,10 @@ import torch.nn.functional as F
 import numpy as np
 import math
 
-from .config import TriplaneConfig
-from .model import TriplaneDriveModel
-from .dummy_data import DummyDrivingDataset
-from .nuscenes_data import NuScenesDataset
+from config import TriplaneConfig
+from model import TriplaneDriveModel
+from dummy_data import DummyDrivingDataset
+from nuscenes_data import NuScenesDataset
 
 try:
     import matplotlib
@@ -182,8 +182,8 @@ def visualize_attention_weights(model, features, intrinsics, extrinsics,
     D = config.feature_dim
     Hf, Wf = features.shape[2], features.shape[3]
 
-    from .utils.geometry import project_3d_to_2d
-    from .utils.positional_encoding import sinusoidal_positional_encoding_3d
+    from utils.geometry import project_3d_to_2d
+    from utils.positional_encoding import sinusoidal_positional_encoding_3d
 
     # Compute visibility masks for each camera
     grid_flat = lifting.grid_3d.reshape(-1, 3)

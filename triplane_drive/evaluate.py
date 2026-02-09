@@ -5,9 +5,9 @@ import torch
 import numpy as np
 from torch.utils.data import DataLoader
 
-from .config import TriplaneConfig
-from .model import TriplaneDriveModel
-from .dummy_data import DummyDrivingDataset
+from config import TriplaneConfig
+from model import TriplaneDriveModel
+from dummy_data import DummyDrivingDataset
 
 
 def compute_min_ade(pred_trajectories, gt_trajectory, horizons_steps=None):

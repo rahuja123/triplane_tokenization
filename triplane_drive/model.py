@@ -3,14 +3,14 @@
 import torch
 import torch.nn as nn
 
-from .config import TriplaneConfig
-from .modules.image_encoder import ImageEncoder
-from .modules.lifting import LiftingModule
-from .modules.triplane import TriplaneRepresentation
-from .modules.patchify import TriplanePatchifier
-from .modules.ar_transformer import ARTransformer, TrajectoryTokenEmbedding
-from .modules.trajectory_head import TrajectoryHead
-from .modules.volumetric_renderer import VolumetricRenderer
+from config import TriplaneConfig
+from modules.image_encoder import ImageEncoder
+from modules.lifting import LiftingModule
+from modules.triplane import TriplaneRepresentation
+from modules.patchify import TriplanePatchifier
+from modules.ar_transformer import ARTransformer, TrajectoryTokenEmbedding
+from modules.trajectory_head import TrajectoryHead
+from modules.volumetric_renderer import VolumetricRenderer
 
 
 class TriplaneDriveModel(nn.Module):

@@ -3,7 +3,7 @@
 import torch
 import torch.nn as nn
 
-from ..config import TriplaneConfig
+from config import TriplaneConfig
 
 
 class TrajectoryHead(nn.Module):
