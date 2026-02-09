@@ -13,7 +13,8 @@ from dummy_data import DummyDrivingDataset
 from nuscenes_data import NuScenesDataset
 
 
-def train_epoch(model, dataloader, optimizer, loss_fn, device, epoch, phase='joint'):
+def train_epoch(model, dataloader, optimizer, loss_fn, device, epoch, phase='joint',
+                grad_clip=1.0):
     """Run one training epoch."""
     model.train()
     total_loss = 0
@@ -39,7 +40,7 @@ def train_epoch(model, dataloader, optimizer, loss_fn, device, epoch, phase='joi
         # Backward
         optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), model.config.grad_clip)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         optimizer.step()
 
         total_loss += loss.item()
@@ -53,7 +54,8 @@ def train_epoch(model, dataloader, optimizer, loss_fn, device, epoch, phase='joi
 
 
 def train(config: TriplaneConfig = None, epochs: int = None, batch_size: int = None,
-          num_samples: int = 50, device_str: str = None, nuscenes_dataroot: str = None):
+          num_samples: int = 50, device_str: str = None, nuscenes_dataroot: str = None,
+          gpu_ids: list = None, num_workers: int = 0):
     """
     Main training function.
 
@@ -62,8 +64,10 @@ def train(config: TriplaneConfig = None, epochs: int = None, batch_size: int = N
         epochs: override config epochs
         batch_size: override config batch size
         num_samples: number of dummy data samples (ignored if nuscenes_dataroot is set)
-        device_str: 'cuda' or 'cpu'
+        device_str: 'cuda', 'cuda:0', 'cuda:2', 'cpu', etc.
         nuscenes_dataroot: path to nuscenes data root (e.g. 'data/nuscenes')
+        gpu_ids: list of GPU ids for DataParallel (e.g. [0,1,2,3]). Overrides device_str.
+        num_workers: number of dataloader workers
     """
     if config is None:
         config = TriplaneConfig()
@@ -73,13 +77,22 @@ def train(config: TriplaneConfig = None, epochs: int = None, batch_size: int = N
     if batch_size is not None:
         config.batch_size = batch_size
 
-    # Device
-    if device_str is None:
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    else:
+    # Device setup
+    if gpu_ids is not None and len(gpu_ids) > 0:
+        # Multi-GPU: primary device is the first GPU in the list
+        device = torch.device(f'cuda:{gpu_ids[0]}')
+        print(f"Using {len(gpu_ids)} GPUs: {gpu_ids}")
+    elif device_str is not None:
         device = torch.device(device_str)
+    else:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    print(f"Using device: {device}")
+    print(f"Primary device: {device}")
+    if torch.cuda.is_available():
+        print(f"Available GPUs: {torch.cuda.device_count()}")
+        for i in range(torch.cuda.device_count()):
+            print(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
+
     print(f"Config: {config.num_epochs} epochs, batch_size={config.batch_size}")
     print(f"Sensor tokens: {config.total_sensor_tokens}, "
           f"Past traj tokens: {config.total_past_traj_tokens}, "
@@ -93,7 +106,8 @@ def train(config: TriplaneConfig = None, epochs: int = None, batch_size: int = N
         dataset = DummyDrivingDataset(config, num_samples=num_samples)
     dataloader = DataLoader(
         dataset, batch_size=config.batch_size,
-        shuffle=True, num_workers=0, drop_last=True
+        shuffle=True, num_workers=num_workers, drop_last=True,
+        pin_memory=(device.type == 'cuda'),
     )
 
     # Model
@@ -109,9 +123,15 @@ def train(config: TriplaneConfig = None, epochs: int = None, batch_size: int = N
         for param in model.traj_embed.parameters():
             param.requires_grad = False
 
+    # Wrap in DataParallel for multi-GPU
+    if gpu_ids is not None and len(gpu_ids) > 1:
+        model = nn.DataParallel(model, device_ids=gpu_ids)
+        print(f"Model wrapped in DataParallel across GPUs {gpu_ids}")
+
     # Count parameters
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    raw_model = model.module if isinstance(model, nn.DataParallel) else model
+    total_params = sum(p.numel() for p in raw_model.parameters())
+    trainable_params = sum(p.numel() for p in raw_model.parameters() if p.requires_grad)
     print(f"Total parameters: {total_params:,}")
     print(f"Trainable parameters: {trainable_params:,}")
 
@@ -132,15 +152,18 @@ def train(config: TriplaneConfig = None, epochs: int = None, batch_size: int = N
 
     # Training loop
     phase_label = config.training_phase
+    grad_clip = config.grad_clip
     for epoch in range(1, config.num_epochs + 1):
-        avg_loss = train_epoch(model, dataloader, optimizer, loss_fn, device, epoch, phase=phase_label)
+        avg_loss = train_epoch(model, dataloader, optimizer, loss_fn, device, epoch,
+                               phase=phase_label, grad_clip=grad_clip)
         scheduler.step()
         print(f"Epoch {epoch}/{config.num_epochs} - Avg loss: {avg_loss:.4f}")
 
-    # Save model
+    # Save model (unwrap DataParallel if needed)
+    save_model = model.module if isinstance(model, nn.DataParallel) else model
     save_path = f'triplane_model_{phase_label}.pt' if phase_label != 'joint' else 'triplane_model.pt'
     torch.save({
-        'model_state_dict': model.state_dict(),
+        'model_state_dict': save_model.state_dict(),
         'config': config,
         'training_phase': phase_label,
     }, save_path)
@@ -154,7 +177,11 @@ def main():
     parser.add_argument('--epochs', type=int, default=2, help='Number of epochs')
     parser.add_argument('--batch_size', type=int, default=2, help='Batch size')
     parser.add_argument('--num_samples', type=int, default=20, help='Number of dummy samples')
-    parser.add_argument('--device', type=str, default=None, help='Device (cuda/cpu)')
+    parser.add_argument('--device', type=str, default=None,
+                        help='Device (cuda/cpu/cuda:0/cuda:2)')
+    parser.add_argument('--gpus', type=str, default=None,
+                        help='Comma-separated GPU ids for multi-GPU training (e.g. 0,1,2,3)')
+    parser.add_argument('--num_workers', type=int, default=0, help='Dataloader workers')
     parser.add_argument('--no_render', action='store_true', help='Disable volumetric rendering')
     parser.add_argument('--small', action='store_true', help='Use smaller config for quick testing')
     parser.add_argument('--nuscenes', type=str, default=None,
@@ -204,9 +231,15 @@ def main():
         config.dino_embed_dim = 64
         config.num_heads_lifting = 2
 
+    # Parse GPU ids
+    gpu_ids = None
+    if args.gpus is not None:
+        gpu_ids = [int(g) for g in args.gpus.split(',')]
+
     train(config, epochs=args.epochs, batch_size=args.batch_size,
           num_samples=args.num_samples, device_str=args.device,
-          nuscenes_dataroot=args.nuscenes)
+          nuscenes_dataroot=args.nuscenes, gpu_ids=gpu_ids,
+          num_workers=args.num_workers)
 
 
 if __name__ == '__main__':
