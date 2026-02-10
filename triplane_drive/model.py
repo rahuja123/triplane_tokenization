@@ -2,6 +2,7 @@
 
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint as grad_checkpoint
 
 from config import TriplaneConfig
 from modules.image_encoder import ImageEncoder
@@ -45,6 +46,9 @@ class TriplaneDriveModel(nn.Module):
         else:
             self.renderer = None
 
+        # Gradient checkpointing flag (set from train.py)
+        self.use_renderer_checkpointing = False
+
     def forward(self, images, intrinsics, extrinsics, past_trajectory,
                 future_trajectory=None):
         """
@@ -81,7 +85,7 @@ class TriplaneDriveModel(nn.Module):
         # Phase 1: scene reconstruction only — skip trajectory prediction
         if self.config.training_phase == 'phase1':
             if self.training and self.renderer is not None:
-                rendered, cam_indices = self.renderer(self.triplane, intrinsics, extrinsics)
+                rendered, cam_indices = self._run_renderer(intrinsics, extrinsics)
                 outputs['rendered_images'] = (rendered, cam_indices)
             return outputs
 
@@ -120,10 +124,23 @@ class TriplaneDriveModel(nn.Module):
 
         # 8. Volumetric rendering (training only)
         if self.training and self.renderer is not None:
-            rendered, cam_indices = self.renderer(self.triplane, intrinsics, extrinsics)
+            rendered, cam_indices = self._run_renderer(intrinsics, extrinsics)
             outputs['rendered_images'] = (rendered, cam_indices)
 
         return outputs
+
+    def _run_renderer(self, intrinsics, extrinsics):
+        """Run renderer with optional gradient checkpointing."""
+        if self.use_renderer_checkpointing and self.training:
+            # Gradient checkpointing: recompute forward during backward to save memory
+            # We need a wrapper since checkpoint expects tensors as inputs
+            rendered, cam_indices = grad_checkpoint(
+                self.renderer, self.triplane, intrinsics, extrinsics,
+                use_reentrant=False
+            )
+        else:
+            rendered, cam_indices = self.renderer(self.triplane, intrinsics, extrinsics)
+        return rendered, cam_indices
 
     @torch.no_grad()
     def generate_trajectory(self, images, intrinsics, extrinsics, past_trajectory,

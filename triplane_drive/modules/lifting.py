@@ -1,4 +1,9 @@
-"""3D Lifting module: simplified deformable cross-attention for 2D->3D feature lifting."""
+"""3D Lifting module: simplified deformable cross-attention for 2D->3D feature lifting.
+
+Optimized with:
+  - Vectorized camera loops (batched grid_sample across all cameras)
+  - Cached positional encoding as buffer
+"""
 
 import torch
 import torch.nn as nn
@@ -14,6 +19,8 @@ class PerImageAttentionLayer(nn.Module):
     """
     Each 3D query attends to features sampled from a single camera image.
     Uses projected 2D locations + small offset grid as key/value positions.
+
+    Vectorized: processes all cameras in a single batched grid_sample call.
     """
 
     def __init__(self, dim, num_heads, num_points=4):
@@ -48,54 +55,49 @@ class PerImageAttentionLayer(nn.Module):
         """
         B, N, D = queries.shape
         C = image_features.shape[1]
-        Hf, Wf = image_features.shape[2], image_features.shape[3]
+        K = self.num_points
 
         residual = queries
         queries = self.norm(queries)
 
         # Predict offsets from queries
-        offsets = self.offset_pred(queries)  # (B, N, num_points*2)
-        offsets = offsets.view(B, N, self.num_points, 2) * 0.05  # small offsets
+        offsets = self.offset_pred(queries)  # (B, N, K*2)
+        offsets = offsets.view(B, N, K, 2) * 0.05  # small offsets
 
-        # Process each camera
-        aggregated = torch.zeros_like(queries)
-        total_weight = torch.zeros(B, N, 1, device=queries.device)
+        # === Vectorized: batch all cameras into one grid_sample call ===
+        # Reshape features: (B, C, Hf, Wf, D) → (B*C, D, Hf, Wf)
+        Hf, Wf = image_features.shape[2], image_features.shape[3]
+        cam_feat_2d = image_features.reshape(B * C, Hf, Wf, D).permute(0, 3, 1, 2)  # (B*C, D, Hf, Wf)
 
-        for c in range(C):
-            cam_feat = image_features[:, c]  # (B, Hf, Wf, D)
-            cam_feat_2d = cam_feat.permute(0, 3, 1, 2)  # (B, D, Hf, Wf)
-            cam_coords = pixel_coords[:, c]  # (B, N, 2)
-            cam_valid = valid_mask[:, c].float()  # (B, N)
+        # Expand coords for offset points: (B, C, N, 2) → (B, C, N, K, 2)
+        coords_expanded = pixel_coords.unsqueeze(3) + offsets.unsqueeze(1)  # (B, C, N, K, 2)
+        # Reshape for grid_sample: (B*C, 1, N*K, 2)
+        coords_flat = coords_expanded.reshape(B * C, N * K, 2)
+        grid = coords_flat.unsqueeze(1)  # (B*C, 1, N*K, 2)
 
-            # Sample at projected location + offsets
-            # Expand coords for offset points
-            coords_expanded = cam_coords.unsqueeze(2) + offsets  # (B, N, num_points, 2)
-            coords_flat = coords_expanded.view(B, N * self.num_points, 2)
+        # Single batched grid_sample for all cameras
+        sampled = F.grid_sample(cam_feat_2d, grid, mode='bilinear',
+                                padding_mode='zeros', align_corners=True)
+        # (B*C, D, 1, N*K) → (B, C, N, K, D)
+        sampled = sampled.squeeze(2).permute(0, 2, 1)  # (B*C, N*K, D)
+        sampled = sampled.view(B, C, N, K, D)
 
-            # grid_sample: (B, D, Hf, Wf) with grid (B, 1, N*K, 2)
-            grid = coords_flat.view(B, 1, N * self.num_points, 2)
-            sampled = F.grid_sample(cam_feat_2d, grid, mode='bilinear',
-                                    padding_mode='zeros', align_corners=True)
-            # (B, D, 1, N*K) -> (B, N, K, D)
-            sampled = sampled.squeeze(2).permute(0, 2, 1).view(B, N, self.num_points, D)
+        # Average over offset points: (B, C, N, D)
+        sampled_mean = sampled.mean(dim=3)
 
-            # Average over offset points
-            sampled_mean = sampled.mean(dim=2)  # (B, N, D)
+        # Compute attention per camera and aggregate
+        q = self.q_proj(queries)  # (B, N, D)
+        k = self.k_proj(sampled_mean)  # (B, C, N, D)
+        v = self.v_proj(sampled_mean)  # (B, C, N, D)
 
-            # Compute attention
-            q = self.q_proj(queries)
-            k = self.k_proj(sampled_mean)
-            v = self.v_proj(sampled_mean)
+        # Attention: (B, 1, N, D) * (B, C, N, D) → (B, C, N, 1)
+        attn = (q.unsqueeze(1) * k).sum(dim=-1, keepdim=True) / math.sqrt(D)
+        # Mask invalid cameras
+        attn = attn * valid_mask.unsqueeze(-1).float()  # (B, C, N, 1)
 
-            # Simple dot-product attention per query
-            attn = (q * k).sum(dim=-1, keepdim=True) / math.sqrt(D)
-            attn = attn * cam_valid.unsqueeze(-1)
-
-            aggregated = aggregated + attn * v
-            total_weight = total_weight + cam_valid.unsqueeze(-1)
-
-        # Normalize by number of valid cameras
-        total_weight = total_weight.clamp(min=1.0)
+        # Weighted sum across cameras
+        aggregated = (attn * v).sum(dim=1)  # (B, N, D)
+        total_weight = valid_mask.float().sum(dim=1).clamp(min=1.0).unsqueeze(-1)  # (B, N, 1)
         aggregated = aggregated / total_weight
 
         return residual + self.out_proj(aggregated)
@@ -104,6 +106,7 @@ class PerImageAttentionLayer(nn.Module):
 class CrossImageAttentionLayer(nn.Module):
     """
     Each 3D query attends to features from ALL cameras jointly.
+    Vectorized: single batched grid_sample for all cameras.
     """
 
     def __init__(self, dim, num_heads):
@@ -134,22 +137,19 @@ class CrossImageAttentionLayer(nn.Module):
         residual = queries
         queries = self.norm(queries)
 
-        # Sample features from all cameras at projected locations
-        all_sampled = []
-        all_valid = []
+        # === Vectorized grid_sample across all cameras ===
+        Hf, Wf = image_features.shape[2], image_features.shape[3]
+        cam_feat_2d = image_features.reshape(B * C, Hf, Wf, D).permute(0, 3, 1, 2)  # (B*C, D, Hf, Wf)
+        grid = pixel_coords.reshape(B * C, N, 2).unsqueeze(1)  # (B*C, 1, N, 2)
 
-        for c in range(C):
-            cam_feat_2d = image_features[:, c].permute(0, 3, 1, 2)  # (B, D, Hf, Wf)
-            grid = pixel_coords[:, c].view(B, 1, N, 2)
-            sampled = F.grid_sample(cam_feat_2d, grid, mode='bilinear',
-                                    padding_mode='zeros', align_corners=True)
-            sampled = sampled.squeeze(2).permute(0, 2, 1)  # (B, N, D)
-            all_sampled.append(sampled)
-            all_valid.append(valid_mask[:, c])
+        sampled = F.grid_sample(cam_feat_2d, grid, mode='bilinear',
+                                padding_mode='zeros', align_corners=True)
+        # (B*C, D, 1, N) → (B, C, N, D)
+        sampled = sampled.squeeze(2).permute(0, 2, 1).view(B, C, N, D)
 
         # Stack: (B, N, C, D)
-        all_sampled = torch.stack(all_sampled, dim=2)
-        all_valid = torch.stack(all_valid, dim=2).float()  # (B, N, C)
+        all_sampled = sampled.permute(0, 2, 1, 3)  # (B, N, C, D)
+        all_valid = valid_mask.permute(0, 2, 1).float()  # (B, N, C)
 
         # Cross-attention: query attends to C camera features
         q = self.q_proj(queries)  # (B, N, D)
@@ -179,6 +179,7 @@ class LiftingModule(nn.Module):
     4. Averages along axes to produce triplanes
 
     For memory efficiency, processes queries in chunks.
+    Positional encoding is cached as a buffer.
     """
 
     def __init__(self, config: TriplaneConfig):
@@ -203,6 +204,11 @@ class LiftingModule(nn.Module):
         grid = create_triplane_grid(config)  # (Sx, Sy, Sz, 3)
         self.register_buffer('grid_3d', grid)
 
+        # Cache positional encoding as a buffer (computed once, not every forward)
+        grid_flat = grid.reshape(-1, 3)
+        pos_enc = sinusoidal_positional_encoding_3d(grid_flat, D)  # (N, D)
+        self.register_buffer('pos_enc', pos_enc)
+
         self.chunk_size = 4096  # process this many queries at a time
 
     def forward(self, image_features, intrinsics, extrinsics):
@@ -221,30 +227,23 @@ class LiftingModule(nn.Module):
         config = self.config
         Sx, Sy, Sz = config.sx, config.sy, config.sz
         D = config.feature_dim
-        Hf = image_features.shape[2]
-        Wf = image_features.shape[3]
 
         # Flatten grid to (N, 3) where N = Sx*Sy*Sz
         grid_flat = self.grid_3d.reshape(-1, 3)  # (N, 3)
         N = grid_flat.shape[0]
 
-        # Positional encoding for queries
-        pos_enc = sinusoidal_positional_encoding_3d(grid_flat, D)  # (N, D)
-        pos_enc = pos_enc.unsqueeze(0).expand(B, -1, -1)  # (B, N, D)
+        # Use cached positional encoding (expand for batch)
+        pos_enc = self.pos_enc.unsqueeze(0).expand(B, -1, -1)  # (B, N, D)
 
         # Initialize queries
         queries = self.query_base.expand(B, N, -1) + pos_enc  # (B, N, D)
 
         # Project all grid points to all cameras
-        # Use full image dims for correct projection + validity, then remap
-        # normalized coords to feature-map space for grid_sample
         grid_batch = grid_flat.unsqueeze(0).expand(B, -1, -1)  # (B, N, 3)
         pixel_coords, valid_mask = project_3d_to_2d(
             grid_batch, intrinsics, extrinsics,
             image_h=config.image_height, image_w=config.image_width
         )
-        # pixel_coords are already normalized to [-1, 1] which works for
-        # grid_sample on any spatial resolution (Hf, Wf)
         # pixel_coords: (B, C, N, 2), valid_mask: (B, C, N)
 
         # Process in chunks for memory efficiency
